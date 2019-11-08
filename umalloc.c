@@ -6,85 +6,117 @@
 // Memory allocator by Kernighan and Ritchie,
 // The C programming Language, 2nd ed.  Section 8.7.
 
-typedef long Align;
+// Refactor of XV6 distribution umalloc.c to make variables and algorithm more
+// clear
 
-union header {
-  struct {
-    union header *ptr;
-    uint size;
-  } s;
-  Align x;
+struct header {
+	uint          size;
 };
 
-typedef union header Header;
+struct freelist_node {
+	struct freelist_node *next;
+	struct header hdr;
+};
 
-static Header base;
-static Header *freep;
+static struct freelist_node  base;
+static struct freelist_node *freelist;
 
 void
-free(void *ap)
+free(void *ptr)
 {
-  Header *bp, *p;
+	struct freelist_node *mem, *node;
 
-  bp = (Header*)ap - 1;
-  for(p = freep; !(bp > p && bp < p->s.ptr); p = p->s.ptr)
-    if(p >= p->s.ptr && (bp > p || bp < p->s.ptr))
-      break;
-  if(bp + bp->s.size == p->s.ptr){
-    bp->s.size += p->s.ptr->s.size;
-    bp->s.ptr = p->s.ptr->s.ptr;
-  } else
-    bp->s.ptr = p->s.ptr;
-  if(p + p->s.size == bp){
-    p->s.size += bp->s.size;
-    p->s.ptr = bp->s.ptr;
-  } else
-    p->s.ptr = bp;
-  freep = p;
+	mem = (struct freelist_node *)ptr - 1;
+	node = freelist;
+	while (!(mem > node && mem < node->next) ) {
+		if (node >= node->next && (mem > node || mem < node->next)) break;
+		node = node->next;
+	}
+	if (mem + mem->hdr.size == node->next) {
+		mem->hdr.size += node->next->hdr.size;
+		mem->next = node->next->next;
+	} else
+		mem->next = node->next;
+
+	if (node + node->hdr.size == mem) {
+		node->hdr.size += mem->hdr.size;
+		node->next = mem->next;
+	} else
+		node->next = mem;
+
+	freelist = node;
 }
 
-static Header*
+static struct freelist_node *
 morecore(uint nu)
 {
-  char *p;
-  Header *hp;
+	char *  ptr;
+	struct freelist_node *node;
 
-  if(nu < 4096)
-    nu = 4096;
-  p = sbrk(nu * sizeof(Header));
-  if(p == (char*)-1)
-    return 0;
-  hp = (Header*)p;
-  hp->s.size = nu;
-  free((void*)(hp + 1));
-  return freep;
+	if (nu < 4096) nu = 4096;
+	ptr = sbrk(nu * sizeof(struct freelist_node));
+	if (ptr == (char *)-1) return 0;
+	node         = (struct freelist_node *)ptr;
+	node->hdr.size = nu;
+	free((void *)(node + 1));
+	return freelist;
 }
 
-void*
+void *
 malloc(uint nbytes)
 {
-  Header *p, *prevp;
-  uint nunits;
+	struct freelist_node *node, *prev_node, *found_node;
+	uint    nunits;
+	int		difference = 0;
+	int		old_diff = 9999999;
 
-  nunits = (nbytes + sizeof(Header) - 1)/sizeof(Header) + 1;
-  if((prevp = freep) == 0){
-    base.s.ptr = freep = prevp = &base;
-    base.s.size = 0;
-  }
-  for(p = prevp->s.ptr; ; prevp = p, p = p->s.ptr){
-    if(p->s.size >= nunits){
-      if(p->s.size == nunits)
-        prevp->s.ptr = p->s.ptr;
-      else {
-        p->s.size -= nunits;
-        p += p->s.size;
-        p->s.size = nunits;
-      }
-      freep = prevp;
-      return (void*)(p + 1);
-    }
-    if(p == freep)
-      if((p = morecore(nunits)) == 0)
-        return 0;
-  }
+	nunits = (nbytes + sizeof(struct freelist_node) - 1) / sizeof(struct freelist_node) + 1;
+	if (freelist == 0) {
+		base.next = freelist = prev_node = &base;
+		base.hdr.size = 0;
+	}
+
+	node = freelist->next;
+	prev_node = freelist;
+	found_node = freelist->next;
+
+	// do a scan over the whole list to find the node with the closest size
+	// if not found, do the same thing it did before
+
+	while (node->next != &base) {
+		prev_node = node;
+		node = node->next;
+
+		difference = node->hdr.size - nunits;
+		if (difference < 0) {
+			difference *= -1;
+		}
+		if (old_diff>difference) {
+			old_diff = difference;
+			found_node = node;
+		}
+	}
+	while (1)	{
+		// printf(1, "in a found node\n");
+		if (found_node->hdr.size >= nunits) {
+			// this is what is doing the "first fit" in the origial
+			if (found_node->hdr.size == nunits) {
+				// this just marks the whole free area as now used
+				prev_node->next = found_node->next;
+			} else {
+				// we need to update the start of the new shrunken free area
+				found_node->hdr.size -= nunits;
+				found_node += found_node->hdr.size;
+				found_node->hdr.size = nunits;
+			}
+			freelist = prev_node;
+			return (void *)(found_node + 1);
+		}
+
+		if (found_node == freelist)
+			if ((found_node = morecore(nunits)) == 0) return 0;
+
+		prev_node = found_node;
+		found_node = found_node->next;
+	}
 }
